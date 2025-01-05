@@ -1,151 +1,139 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Title and description
+st.title("Stock Trading Dashboard")
+st.write("An interactive web application to visualize and analyze stock market data.")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Sidebar for user input
+st.sidebar.header("Input Options")
+selected_stock = st.sidebar.text_input("Enter a stock ticker (e.g., AAPL, TSLA):", value="AAPL")
+timeframe = st.sidebar.selectbox("Select timeframe:", options=["1d", "5d", "1mo", "3mo", "6mo", "1y", "5y", "max"], index=3)
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Fetch stock data
+def get_stock_data(ticker, period):
+    try:
+        stock = yf.Ticker(ticker)
+        data = stock.history(period=period)
+        return data
+    except Exception as e:
+        st.error(f"Failed to retrieve data for {ticker}: {e}")
+        return None
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+data = get_stock_data(selected_stock, timeframe)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+if data is not None:
+    # Display current stock price
+    st.subheader(f"Current Stock Price: {selected_stock}")
+    try:
+        latest_price = data['Close'][-1]
+        st.metric(label="Price", value=f"${latest_price:.2f}")
+    except Exception as e:
+        st.error("Error calculating current price.")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Line chart for historical trends
+    st.subheader("Historical Stock Trends")
+    st.line_chart(data['Close'], use_container_width=True)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+    # Bar chart for trading volume
+    st.subheader("Trading Volume")
+    st.bar_chart(data['Volume'], use_container_width=True)
+
+    # Moving averages
+    st.subheader("Moving Averages")
+    ma_periods = [20, 50, 200]
+    for ma in ma_periods:
+        data[f"MA_{ma}"] = data['Close'].rolling(window=ma).mean()
+
+    st.line_chart(data[["Close"] + [f"MA_{ma}" for ma in ma_periods]])
+
+    # Volatility (standard deviation of returns)
+    st.subheader("Volatility")
+    data['Daily Returns'] = data['Close'].pct_change()
+    volatility = data['Daily Returns'].rolling(window=20).std()
+    st.line_chart(volatility, use_container_width=True)
+
+    # RSI calculation
+    st.subheader("Relative Strength Index (RSI)")
+    def calculate_rsi(data, period=14):
+        delta = data['Close'].diff()
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+
+        avg_gain = pd.Series(gain).rolling(window=period).mean()
+        avg_loss = pd.Series(loss).rolling(window=period).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    data['RSI'] = calculate_rsi(data)
+    st.line_chart(data['RSI'], use_container_width=True)
+
+    # Comparison of multiple stocks
+    st.sidebar.subheader("Compare Stocks")
+    compare_stocks = st.sidebar.text_area("Enter stock tickers to compare (comma-separated):", value="MSFT,GOOG")
+    compare_list = [ticker.strip() for ticker in compare_stocks.split(',')]
+
+    if compare_list:
+        comparison_data = {}
+        for ticker in compare_list:
+            compare_data = get_stock_data(ticker, timeframe)
+            if compare_data is not None:
+                comparison_data[ticker] = compare_data['Close']
+
+        if comparison_data:
+            st.subheader("Stock Comparison")
+            comparison_df = pd.DataFrame(comparison_data)
+            st.line_chart(comparison_df)
+
+    # Candlestick chart
+    st.subheader("Candlestick Chart")
+    try:
+        import plotly.graph_objects as go
+
+        fig = go.Figure(data=[go.Candlestick(
+            x=data.index,
+            open=data['Open'],
+            high=data['High'],
+            low=data['Low'],
+            close=data['Close']
+        )])
+        st.plotly_chart(fig, use_container_width=True)
+    except ImportError:
+        st.error("Plotly is not installed. Install it to enable the candlestick chart feature.")
+
+    # Save data to CSV
+    st.subheader("Download Stock Data")
+    csv = data.to_csv().encode('utf-8')
+    st.download_button(
+        label="Download Data as CSV",
+        data=csv,
+        file_name=f"{selected_stock}_data.csv",
+        mime="text/csv"
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Customization options
+    st.sidebar.header("Customization Options")
+    selected_indicators = st.sidebar.multiselect(
+        "Select indicators to display:",
+        options=["Moving Averages", "Volatility", "RSI"],
+        default=["Moving Averages", "Volatility", "RSI"]
+    )
 
-    return gdp_df
+    if "Moving Averages" in selected_indicators:
+        st.subheader("Moving Averages")
+        st.line_chart(data[["Close"] + [f"MA_{ma}" for ma in ma_periods]])
 
-gdp_df = get_gdp_data()
+    if "Volatility" in selected_indicators:
+        st.subheader("Volatility")
+        st.line_chart(volatility, use_container_width=True)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    if "RSI" in selected_indicators:
+        st.subheader("RSI")
+        st.line_chart(data['RSI'], use_container_width=True)
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    st.write("Use the sidebar to customize your view and explore more features.")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
